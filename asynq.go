@@ -121,9 +121,14 @@ type TaskInfo struct {
 	// Retention is duration of the retention period after the task is successfully processed.
 	Retention time.Duration
 
+	// CreatedAt is the time when the task was created.
+	CreatedAt time.Time
+
 	// CompletedAt is the time when the task is processed successfully.
 	// Zero value (i.e. time.Time{}) indicates no value.
 	CompletedAt time.Time
+
+	ProcessedAt time.Time
 
 	// Result holds the result data associated with the task.
 	// Use ResultWriter to write result data from the Handler.
@@ -154,7 +159,9 @@ func newTaskInfo(msg *base.TaskMessage, state base.TaskState, nextProcessAt time
 		Retention:     time.Duration(msg.Retention) * time.Second,
 		NextProcessAt: nextProcessAt,
 		LastFailedAt:  fromUnixTimeOrZero(msg.LastFailedAt),
+		CreatedAt:     fromUnixTimeOrZero(msg.CreatedAt),
 		CompletedAt:   fromUnixTimeOrZero(msg.CompletedAt),
+		ProcessedAt:   fromUnixTimeOrZero(msg.ProcessedAt),
 		Result:        result,
 	}
 
@@ -173,6 +180,8 @@ func newTaskInfo(msg *base.TaskMessage, state base.TaskState, nextProcessAt time
 		info.State = TaskStateCompleted
 	case base.TaskStateAggregating:
 		info.State = TaskStateAggregating
+	case base.TaskStateQueueFull:
+		info.State = TaskStateQueueFull
 	default:
 		panic(fmt.Sprintf("internal error: unknown state: %d", state))
 	}
@@ -203,6 +212,9 @@ const (
 
 	// Indicates that the task is waiting in a group to be aggregated into one task.
 	TaskStateAggregating
+
+	// Indicates that the task queue is full and the task is waiting to be processed.
+	TaskStateQueueFull
 )
 
 func (s TaskState) String() string {
@@ -221,6 +233,8 @@ func (s TaskState) String() string {
 		return "completed"
 	case TaskStateAggregating:
 		return "aggregating"
+	case TaskStateQueueFull:
+		return "queue_full"
 	}
 	panic("asynq: unknown task state")
 }

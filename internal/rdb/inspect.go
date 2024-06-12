@@ -10,9 +10,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/redis/go-redis/v9"
 	"github.com/hibiken/asynq/internal/base"
 	"github.com/hibiken/asynq/internal/errors"
+	"github.com/redis/go-redis/v9"
 	"github.com/spf13/cast"
 )
 
@@ -1414,6 +1414,63 @@ func (r *RDB) archiveAll(src, dst, qname string) (int64, error) {
 
 // Input:
 // KEYS[1] -> asynq:{<qname>}:t:<task_id>
+// --
+// ARGV[1] -> task ID
+// ARGV[2] -> queue key prefix
+//
+// Output:
+// Numeric code indicating the status:
+// Returns 1 if task is successfully deleted.
+// Returns 0 if task is not found.
+// Returns -1 if task is in active or archived state.
+var cancelTaskCmd = redis.NewScript(`
+if redis.call("EXISTS", KEYS[1]) == 0 then
+	return 0
+end
+local state = unpack(redis.call("HMGET", KEYS[1], "state"))
+if state == "active" or state == "archived" then
+	return -1
+end
+if state == "pending" or state == "queue_full" then
+	if redis.call("LREM", ARGV[2] .. state, 0, ARGV[1]) == 0 then
+		return redis.error_reply("task is not found in list: " .. tostring(ARGV[2] .. state))
+	end
+end
+local unique_key = redis.call("HGET", KEYS[1], "unique_key")
+if unique_key and unique_key ~= "" and redis.call("GET", unique_key) == ARGV[1] then
+	redis.call("DEL", unique_key)
+end
+return redis.call("DEL", KEYS[1])
+`)
+
+// CancelTask removes the task from the queue.
+func (r *RDB) CancelTask(qname, id string) (err error) {
+	var op errors.Op = "rdb.CancelTask"
+	keys := []string{
+		base.TaskKey(qname, id),
+	}
+	argv := []interface{}{
+		id,
+		base.QueueKeyPrefix(qname),
+	}
+	n, err := r.runScriptWithErrorCode(context.Background(), op, cancelTaskCmd, keys, argv...)
+	if err != nil {
+		return errors.E(op, errors.Unknown, fmt.Sprintf("redis eval error: %v", err))
+	}
+	switch n {
+	case 1:
+		return nil
+	case 0:
+		return errors.E(op, errors.NotFound, &errors.TaskNotFoundError{Queue: qname, ID: id})
+	case -1:
+		return errors.E(op, errors.FailedPrecondition, fmt.Sprintf("cannot cancel task %q in state active or archived", id))
+	default:
+		return errors.E(op, errors.Internal, fmt.Sprintf("unexpected return value from cancelTaskCmd script: %d", n))
+	}
+}
+
+// Input:
+// KEYS[1] -> asynq:{<qname>}:t:<task_id>
 // KEYS[2] -> asynq:{<qname>}:groups
 // --
 // ARGV[1] -> task ID
@@ -1433,7 +1490,7 @@ local state, group = unpack(redis.call("HMGET", KEYS[1], "state", "group"))
 if state == "active" then
 	return -1
 end
-if state == "pending" then
+if state == "pending" or state == "queue_full" then
 	if redis.call("LREM", ARGV[2] .. state, 0, ARGV[1]) == 0 then
 		return redis.error_reply("task is not found in list: " .. tostring(ARGV[2] .. state))
 	end

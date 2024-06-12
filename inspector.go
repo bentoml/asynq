@@ -600,6 +600,23 @@ func (i *Inspector) DeleteTask(queue, id string) error {
 
 }
 
+func (i *Inspector) CancelTask(queue, id string) error {
+	if err := base.ValidateQueueName(queue); err != nil {
+		return fmt.Errorf("asynq: %v", err)
+	}
+	err := i.rdb.CancelTask(queue, id)
+	switch {
+	case errors.IsQueueNotFound(err):
+		return fmt.Errorf("asynq: %w", ErrQueueNotFound)
+	case errors.IsTaskNotFound(err):
+		return fmt.Errorf("asynq: %w", ErrTaskNotFound)
+	case err != nil:
+		return fmt.Errorf("asynq: %v", err)
+	}
+	return nil
+
+}
+
 // RunAllScheduledTasks schedules all scheduled tasks from the given queue to run,
 // and reports the number of tasks scheduled to run.
 func (i *Inspector) RunAllScheduledTasks(queue string) (int, error) {

@@ -276,6 +276,12 @@ func (p *processor) handleSucceededMessage(l *base.Lease, msg *base.TaskMessage)
 	} else {
 		p.markAsDone(l, msg)
 	}
+	ctx, _ := context.WithDeadline(context.Background(), l.Deadline())
+	p.broker.FindAndPendingQueueFullTask(ctx, msg.Queue)
+}
+
+func (p *processor) schedulePendingTask() {
+
 }
 
 func (p *processor) markAsComplete(l *base.Lease, msg *base.TaskMessage) {

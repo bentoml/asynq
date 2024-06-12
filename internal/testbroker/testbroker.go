@@ -306,3 +306,21 @@ func (tb *TestBroker) ReclaimStaleAggregationSets(qname string) error {
 	}
 	return tb.real.ReclaimStaleAggregationSets(qname)
 }
+
+func (tb *TestBroker) FindAndPendingQueueFullTask(ctx context.Context, queue string) error {
+	tb.mu.Lock()
+	defer tb.mu.Unlock()
+	if tb.sleeping {
+		return errRedisDown
+	}
+	return tb.real.FindAndPendingQueueFullTask(ctx, queue)
+}
+
+func (tb *TestBroker) CancelTask(qname, taskID string) error {
+	tb.mu.Lock()
+	defer tb.mu.Unlock()
+	if tb.sleeping {
+		return errRedisDown
+	}
+	return tb.real.CancelTask(qname, taskID)
+}

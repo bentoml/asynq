@@ -62,6 +62,103 @@ func setup(tb testing.TB) (r *RDB) {
 	return r
 }
 
+func TestCancelTask(t *testing.T) {
+	r := setup(t)
+	defer r.Close()
+	queueName := "cancelTask"
+	t1 := h.NewTaskMessageWithQueue(queueName, nil, queueName)
+
+	enqueueTime := time.Now()
+	r.SetClock(timeutil.NewSimulatedClock(enqueueTime))
+	h.FlushDB(t, r.client)
+	ctx := context.Background()
+	err := r.Enqueue(ctx, t1)
+	if err != nil {
+		t.Errorf("(*RDB).Enqueue(msg) = %v, want nil", err)
+	}
+	pendingKey := base.PendingKey(queueName)
+	pendingIDs := r.client.LRange(context.Background(), pendingKey, 0, -1).Val()
+	if n := len(pendingIDs); n != 1 {
+		t.Errorf("Redis LIST %q contains %d IDs, want 1", pendingKey, n)
+	}
+	err = r.CancelTask(queueName, t1.ID)
+	if err != nil {
+		t.Errorf("(*RDB).CancelTask(queueName, t1.ID) = %v, want nil", err)
+	}
+	pendingIDs = r.client.LRange(context.Background(), pendingKey, 0, -1).Val()
+	if n := len(pendingIDs); n != 0 {
+		t.Errorf("Redis LIST %q contains %d IDs, want 0", pendingKey, n)
+	}
+
+	t2 := h.NewTaskMessageWithQueue(queueName, nil, queueName)
+	err = r.Schedule(ctx, t2, time.Now())
+	if err != nil {
+		t.Errorf("(*RDB).Schedule(msg, time.Now()) = %v, want nil", err)
+	}
+	err = r.CancelTask(queueName, t2.ID)
+	if err != nil {
+		if !strings.Contains(err.Error(), "pending") {
+			t.Errorf("(*RDB).CancelTask(queueName, t2.ID) = %v, want task is not in pending state", err)
+		}
+	}
+
+	err = r.CancelTask(queueName, "nonexistent-id")
+	if err != nil {
+		if !strings.Contains(err.Error(), "not find") {
+			t.Errorf("(*RDB).CancelTask(queueName, t2.ID) = %v, want task not found", err)
+		}
+	}
+}
+
+func TestEnqueueWithQueueSize(t *testing.T) {
+	r := setup(t)
+	defer r.Close()
+	queueName := "queue_size"
+	t1 := h.NewTaskMessageWithQueue(queueName, nil, queueName)
+	t1.QueueSize = 1
+	t2 := h.NewTaskMessageWithQueue(queueName, nil, queueName)
+	t2.QueueSize = 1
+
+	enqueueTime := time.Now()
+	r.SetClock(timeutil.NewSimulatedClock(enqueueTime))
+	h.FlushDB(t, r.client)
+	ctx := context.Background()
+	err := r.Enqueue(ctx, t1)
+	if err != nil {
+		t.Errorf("(*RDB).Enqueue(msg) = %v, want nil", err)
+	}
+	err = r.Enqueue(ctx, t2)
+	if err != nil {
+		t.Errorf("(*RDB).Enqueue(msg) = %v, want nil", err)
+	}
+	pendingKey := base.PendingKey(queueName)
+	pendingIDs := r.client.LRange(context.Background(), pendingKey, 0, -1).Val()
+	if n := len(pendingIDs); n != 1 {
+		t.Errorf("Redis LIST %q contains %d IDs, want 1", pendingKey, n)
+	}
+	// check queue full key
+	queueFullKey := base.QueueFullKey(queueName)
+	queueFullIDs := r.client.LRange(context.Background(), queueFullKey, 0, -1).Val()
+	if n := len(queueFullIDs); n != 1 {
+		t.Errorf("Redis LIST %q contains %d IDs, want 1", queueFullKey, n)
+	}
+
+	// check find and pending queue full task
+	err = r.FindAndPendingQueueFullTask(ctx, queueName)
+	if err != nil {
+		t.Errorf("(*RDB).FindAndPendingQueueFullTask(queueName) = %v, want nil", err)
+	}
+	pendingIDs = r.client.LRange(context.Background(), pendingKey, 0, -1).Val()
+	if n := len(pendingIDs); n != 2 {
+		t.Errorf("Redis LIST %q contains %d IDs, want 2", pendingKey, n)
+	}
+	// check queue full key
+	queueFullIDs = r.client.LRange(context.Background(), queueFullKey, 0, -1).Val()
+	if n := len(queueFullIDs); n != 0 {
+		t.Errorf("Redis LIST %q contains %d IDs, want 0", queueFullKey, n)
+	}
+}
+
 func TestEnqueue(t *testing.T) {
 	r := setup(t)
 	defer r.Close()

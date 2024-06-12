@@ -85,24 +85,38 @@ func (r *RDB) runScriptWithErrorCode(ctx context.Context, op errors.Op, script *
 // Input:
 // KEYS[1] -> asynq:{<qname>}:t:<task_id>
 // KEYS[2] -> asynq:{<qname>}:pending
+// KEYS[3] -> asynq:{<qname>}:queue_full
 // --
 // ARGV[1] -> task message data
 // ARGV[2] -> task ID
 // ARGV[3] -> current unix time in nsec
+// ARGV[4] -> queue size
 //
 // Output:
-// Returns 1 if successfully enqueued
+// Returns 2 if successfully enqueued
+// Returns 1 if successfully enqueued to queue_full
 // Returns 0 if task ID already exists
+
 var enqueueCmd = redis.NewScript(`
 if redis.call("EXISTS", KEYS[1]) == 1 then
 	return 0
 end
+
+if redis.call("LLEN", KEYS[2]) + redis.call("LLEN", KEYS[3]) + redis.call("LLEN", KEYS[4]) + redis.call("LLEN", KEYS[5]) >= tonumber(ARGV[4]) then
+    redis.call("HSET", KEYS[1],
+               "msg", ARGV[1],
+               "state", "queue_full",
+               "queue_full_since", ARGV[3])
+		redis.call("LPUSH", KEYS[6], ARGV[2])
+		return 1
+end
+
 redis.call("HSET", KEYS[1],
            "msg", ARGV[1],
            "state", "pending",
            "pending_since", ARGV[3])
 redis.call("LPUSH", KEYS[2], ARGV[2])
-return 1
+return 2
 `)
 
 // Enqueue adds the given task to the pending list of the queue.
@@ -118,11 +132,20 @@ func (r *RDB) Enqueue(ctx context.Context, msg *base.TaskMessage) error {
 	keys := []string{
 		base.TaskKey(msg.Queue, msg.ID),
 		base.PendingKey(msg.Queue),
+		base.ActiveKey(msg.Queue),
+		base.ScheduledKey(msg.Queue),
+		base.PausedKey(msg.Queue),
+		base.QueueFullKey(msg.Queue),
+	}
+	queueSize := msg.QueueSize
+	if queueSize == 0 {
+		queueSize = base.DefaultQueueSize
 	}
 	argv := []interface{}{
 		encoded,
 		msg.ID,
 		r.clock.Now().UnixNano(),
+		queueSize,
 	}
 	n, err := r.runScriptWithErrorCode(ctx, op, enqueueCmd, keys, argv...)
 	if err != nil {
@@ -201,6 +224,48 @@ func (r *RDB) EnqueueUnique(ctx context.Context, msg *base.TaskMessage, ttl time
 	return nil
 }
 
+// findAndPendingQueueFullTaskCmd finds a task in the queue and marks it as pending.
+//
+// KEYS[1] -> asynq:{<qname>}:queue_full
+// KEYS[2] -> asynq:{<qname>}:t:
+// KEYS[3] -> asynq:{<qname>}:pending
+// --
+// ARGV[1] -> current unix time in nsec
+//
+// Output:
+// Returns 1 if a task is found and marked as pending.
+// Returns 0 if no task is found.
+var findAndPendingQueueFullTaskCmd = redis.NewScript(`
+local taskID = redis.call("LPOP", KEYS[1])
+if not taskID then
+    return 0
+end
+
+local taskKey = KEYS[2] .. taskID
+redis.call("HSET", taskKey, "state", "pending", "pending_since", ARGV[1])
+redis.call("LPUSH", KEYS[3], taskID)
+return 1
+`)
+
+// FindAndPendingQueueFullTask finds a task in the queue and marks it as pending.
+func (r *RDB) FindAndPendingQueueFullTask(ctx context.Context, queue string) error {
+	var op errors.Op = "rdb.FindAndPendingQueueFullTask"
+	now := r.clock.Now().UnixNano()
+
+	keys := []string{
+		base.QueueFullKey(queue),
+		base.TaskKeyPrefix(queue),
+		base.PendingKey(queue),
+	}
+	argv := []interface{}{now}
+	_, err := r.runScriptWithErrorCode(ctx, op, findAndPendingQueueFullTaskCmd, keys, argv...)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
 // Input:
 // KEYS[1] -> asynq:{<qname>}:pending
 // KEYS[2] -> asynq:{<qname>}:paused
@@ -259,6 +324,14 @@ func (r *RDB) Dequeue(qnames ...string) (msg *base.TaskMessage, leaseExpirationT
 		}
 		if msg, err = base.DecodeMessage([]byte(encoded)); err != nil {
 			return nil, time.Time{}, errors.E(op, errors.Internal, fmt.Sprintf("cannot decode message: %v", err))
+		}
+		msg.ProcessedAt = time.Now().Unix()
+		updatedMsg, err := base.EncodeMessage(msg)
+		if err != nil {
+			return nil, time.Time{}, errors.E(op, errors.Internal, fmt.Sprintf("cannot encode updated message: %v", err))
+		}
+		if err = r.client.HSet(context.Background(), base.TaskKey(qname, msg.ID), "msg", updatedMsg).Err(); err != nil {
+			return nil, time.Time{}, errors.E(op, errors.Unknown, fmt.Sprintf("failed to update task message: %v", err))
 		}
 		return msg, leaseExpirationTime, nil
 	}

@@ -10,11 +10,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/redis/go-redis/v9"
 	"github.com/google/uuid"
 	"github.com/hibiken/asynq/internal/base"
 	"github.com/hibiken/asynq/internal/errors"
 	"github.com/hibiken/asynq/internal/rdb"
+	"github.com/redis/go-redis/v9"
 )
 
 // A Client is responsible for scheduling tasks.
@@ -49,6 +49,7 @@ const (
 	TaskIDOpt
 	RetentionOpt
 	GroupOpt
+	QueueSizeOpt
 )
 
 // Option specifies the task processing behavior.
@@ -75,6 +76,7 @@ type (
 	processInOption time.Duration
 	retentionOption time.Duration
 	groupOption     string
+	queueSizeOption int
 )
 
 // MaxRetry returns an option to specify the max number of times
@@ -150,9 +152,9 @@ func (t deadlineOption) Value() interface{} { return time.Time(t) }
 // TTL duration must be greater than or equal to 1 second.
 //
 // Uniqueness of a task is based on the following properties:
-//     - Task Type
-//     - Task Payload
-//     - Queue Name
+//   - Task Type
+//   - Task Payload
+//   - Queue Name
 func Unique(ttl time.Duration) Option {
 	return uniqueOption(ttl)
 }
@@ -206,6 +208,14 @@ func (name groupOption) String() string     { return fmt.Sprintf("Group(%q)", st
 func (name groupOption) Type() OptionType   { return GroupOpt }
 func (name groupOption) Value() interface{} { return string(name) }
 
+func QueueSize(n int) Option {
+	return queueSizeOption(n)
+}
+
+func (n queueSizeOption) String() string     { return fmt.Sprintf("QueueSize(%d)", int(n)) }
+func (n queueSizeOption) Type() OptionType   { return QueueSizeOpt }
+func (n queueSizeOption) Value() interface{} { return int(n) }
+
 // ErrDuplicateTask indicates that the given task could not be enqueued since it's a duplicate of another task.
 //
 // ErrDuplicateTask error only applies to tasks enqueued with a Unique option.
@@ -219,6 +229,7 @@ var ErrTaskIDConflict = errors.New("task ID conflicts with another task")
 type option struct {
 	retry     int
 	queue     string
+	queueSize int
 	taskID    string
 	timeout   time.Duration
 	deadline  time.Time
@@ -279,6 +290,10 @@ func composeOptions(opts ...Option) (option, error) {
 				return option{}, errors.New("group key cannot be empty")
 			}
 			res.group = key
+		case queueSizeOption:
+			if n := int(opt); n > 0 {
+				res.queueSize = n
+			}
 		default:
 			// ignore unexpected option
 		}
@@ -367,19 +382,21 @@ func (c *Client) EnqueueContext(ctx context.Context, task *Task, opts ...Option)
 	if opt.uniqueTTL > 0 {
 		uniqueKey = base.UniqueKey(opt.queue, task.Type(), task.Payload())
 	}
+	now := time.Now()
 	msg := &base.TaskMessage{
 		ID:        opt.taskID,
 		Type:      task.Type(),
 		Payload:   task.Payload(),
 		Queue:     opt.queue,
+		QueueSize: opt.queueSize,
 		Retry:     opt.retry,
 		Deadline:  deadline.Unix(),
 		Timeout:   int64(timeout.Seconds()),
 		UniqueKey: uniqueKey,
 		GroupKey:  opt.group,
 		Retention: int64(opt.retention.Seconds()),
+		CreatedAt: now.Unix(),
 	}
-	now := time.Now()
 	var state base.TaskState
 	if opt.processAt.After(now) {
 		err = c.schedule(ctx, msg, opt.processAt, opt.uniqueTTL)
