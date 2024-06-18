@@ -1414,44 +1414,72 @@ func (r *RDB) archiveAll(src, dst, qname string) (int64, error) {
 
 // Input:
 // KEYS[1] -> asynq:{<qname>}:t:<task_id>
+// KEYS[2] -> asynq:{<qname>}:canceled
+// KEYS[3] -> asynq:{<qname>}:pending
+// KEYS[4] -> asynq:{<qname>}:queue_full
 // --
 // ARGV[1] -> task ID
-// ARGV[2] -> queue key prefix
+// ARGV[2] -> task expiration time in unix time
+// ARGV[3] -> task message data
 //
 // Output:
 // Numeric code indicating the status:
 // Returns 1 if task is successfully deleted.
 // Returns 0 if task is not found.
-// Returns -1 if task is in active or archived state.
+// Returns -1 if task is not in pending or queue_full state.
+// Returns -2 if task is failed to add to canceled set.
 var cancelTaskCmd = redis.NewScript(`
 if redis.call("EXISTS", KEYS[1]) == 0 then
-	return 0
+    return 0
 end
-local state = unpack(redis.call("HMGET", KEYS[1], "state"))
-if state == "active" or state == "archived" then
-	return -1
+
+local state = redis.call("HGET", KEYS[1], "state")
+if state ~= "pending" and state ~= "queue_full" then
+    return -1
 end
-if state == "pending" or state == "queue_full" then
-	if redis.call("LREM", ARGV[2] .. state, 0, ARGV[1]) == 0 then
-		return redis.error_reply("task is not found in list: " .. tostring(ARGV[2] .. state))
-	end
+
+if state == "pending" then
+    if redis.call("LREM", KEYS[3], 0, ARGV[1]) == 0 then
+        return 0
+    end
+elseif state == "queue_full" then
+    if redis.call("LREM", KEYS[4], 0, ARGV[1]) == 0 then
+        return 0
+    end
 end
-local unique_key = redis.call("HGET", KEYS[1], "unique_key")
-if unique_key and unique_key ~= "" and redis.call("GET", unique_key) == ARGV[1] then
-	redis.call("DEL", unique_key)
+
+if redis.call("ZADD", KEYS[2], ARGV[2], ARGV[1]) ~= 1 then
+    return -2
 end
-return redis.call("DEL", KEYS[1])
+
+redis.call("HSET", KEYS[1], "msg", ARGV[3], "state", "canceled")
+return 1
 `)
 
 // CancelTask removes the task from the queue.
-func (r *RDB) CancelTask(qname, id string) (err error) {
+func (r *RDB) CancelTask(qname, id string) error {
 	var op errors.Op = "rdb.CancelTask"
+	task, err := r.GetTaskInfo(qname, id)
+	if err != nil {
+		return errors.E(op, errors.CanonicalCode(err), err)
+	}
+	msg := task.Message
+	now := r.clock.Now()
+	msg.CanceledAt = now.Unix()
+	encoded, err := base.EncodeMessage(msg)
+	if err != nil {
+		return errors.E(op, errors.Unknown, fmt.Sprintf("cannot encode message: %v", err))
+	}
 	keys := []string{
-		base.TaskKey(qname, id),
+		base.TaskKey(msg.Queue, msg.ID),
+		base.CanceledKey(msg.Queue),
+		base.PendingKey(msg.Queue),
+		base.QueueFullKey(msg.Queue),
 	}
 	argv := []interface{}{
-		id,
-		base.QueueKeyPrefix(qname),
+		msg.ID,
+		now.Unix() + msg.Retention,
+		encoded,
 	}
 	n, err := r.runScriptWithErrorCode(context.Background(), op, cancelTaskCmd, keys, argv...)
 	if err != nil {
@@ -1461,9 +1489,11 @@ func (r *RDB) CancelTask(qname, id string) (err error) {
 	case 1:
 		return nil
 	case 0:
-		return errors.E(op, errors.NotFound, &errors.TaskNotFoundError{Queue: qname, ID: id})
+		return errors.E(op, errors.NotFound, &errors.TaskNotFoundError{Queue: msg.Queue, ID: msg.ID})
 	case -1:
-		return errors.E(op, errors.FailedPrecondition, fmt.Sprintf("cannot cancel task %q in state active or archived", id))
+		return errors.E(op, errors.FailedPrecondition, fmt.Sprintf("can only cancel pending or queue_full task: %s", msg.ID))
+	case -2:
+		return errors.E(op, errors.Internal, fmt.Sprintf("failed to add task to canceled set: %s", msg.ID))
 	default:
 		return errors.E(op, errors.Internal, fmt.Sprintf("unexpected return value from cancelTaskCmd script: %d", n))
 	}

@@ -128,7 +128,13 @@ type TaskInfo struct {
 	// Zero value (i.e. time.Time{}) indicates no value.
 	CompletedAt time.Time
 
+	// ProcessedAt is the time when the task is processed.
+	// Zero value (i.e. time.Time{}) indicates no value.
 	ProcessedAt time.Time
+
+	// CanceledAt is the time when the task is canceled.
+	// Zero value (i.e. time.Time{}) indicates no value.
+	CanceledAt time.Time
 
 	// Result holds the result data associated with the task.
 	// Use ResultWriter to write result data from the Handler.
@@ -162,6 +168,7 @@ func newTaskInfo(msg *base.TaskMessage, state base.TaskState, nextProcessAt time
 		CreatedAt:     fromUnixTimeOrZero(msg.CreatedAt),
 		CompletedAt:   fromUnixTimeOrZero(msg.CompletedAt),
 		ProcessedAt:   fromUnixTimeOrZero(msg.ProcessedAt),
+		CanceledAt:    fromUnixTimeOrZero(msg.CanceledAt),
 		Result:        result,
 	}
 
@@ -182,6 +189,8 @@ func newTaskInfo(msg *base.TaskMessage, state base.TaskState, nextProcessAt time
 		info.State = TaskStateAggregating
 	case base.TaskStateQueueFull:
 		info.State = TaskStateQueueFull
+	case base.TaskStateCanceled:
+		info.State = TaskStateCanceled
 	default:
 		panic(fmt.Sprintf("internal error: unknown state: %d", state))
 	}
@@ -215,6 +224,9 @@ const (
 
 	// Indicates that the task queue is full and the task is waiting to be processed.
 	TaskStateQueueFull
+
+	// Indicates that the task is canceled and will not be processed.
+	TaskStateCanceled
 )
 
 func (s TaskState) String() string {
@@ -235,6 +247,8 @@ func (s TaskState) String() string {
 		return "aggregating"
 	case TaskStateQueueFull:
 		return "queue_full"
+	case TaskStateCanceled:
+		return "canceled"
 	}
 	panic("asynq: unknown task state")
 }

@@ -54,6 +54,7 @@ const (
 	TaskStateCompleted
 	TaskStateAggregating // describes a state where task is waiting in a group to be aggregated
 	TaskStateQueueFull
+	TaskStateCanceled
 )
 
 func (s TaskState) String() string {
@@ -72,6 +73,10 @@ func (s TaskState) String() string {
 		return "completed"
 	case TaskStateAggregating:
 		return "aggregating"
+	case TaskStateQueueFull:
+		return "queue_full"
+	case TaskStateCanceled:
+		return "canceled"
 	}
 	panic(fmt.Sprintf("internal error: unknown task state %d", s))
 }
@@ -94,6 +99,8 @@ func TaskStateFromString(s string) (TaskState, error) {
 		return TaskStateAggregating, nil
 	case "queue_full":
 		return TaskStateQueueFull, nil
+	case "canceled":
+		return TaskStateCanceled, nil
 	}
 	return 0, errors.E(errors.FailedPrecondition, fmt.Sprintf("%q is not supported task state", s))
 }
@@ -127,8 +134,14 @@ func PendingKey(qname string) string {
 	return fmt.Sprintf("%spending", QueueKeyPrefix(qname))
 }
 
+// QueueFullKey returns a redis key for the given queue name.
 func QueueFullKey(qname string) string {
 	return fmt.Sprintf("%squeue_full", QueueKeyPrefix(qname))
+}
+
+// CanceledKey returns a redis key for the given queue name.
+func CanceledKey(qname string) string {
+	return fmt.Sprintf("%scanceled", QueueKeyPrefix(qname))
 }
 
 // ActiveKey returns a redis key for the active tasks.
@@ -313,7 +326,17 @@ type TaskMessage struct {
 	// Use zero to indicate no value.
 	CompletedAt int64
 
+	// ProcessedAt is the time the task was processed in Unix time,
+	// the number of seconds elapsed since January 1, 1970 UTC.
+	//
+	// Use zero to indicate no value.
 	ProcessedAt int64
+
+	// CanceledAt is the time the task was canceled in Unix time,
+	// the number of seconds elapsed since January 1, 1970 UTC.
+	//
+	// Use zero to indicate no value.
+	CanceledAt int64
 }
 
 // EncodeMessage marshals the given task message and returns an encoded bytes.
@@ -338,6 +361,7 @@ func EncodeMessage(msg *TaskMessage) ([]byte, error) {
 		CompletedAt:  msg.CompletedAt,
 		CreatedAt:    msg.CreatedAt,
 		ProcessedAt:  msg.ProcessedAt,
+		CanceledAt:   msg.CanceledAt,
 	})
 }
 
@@ -364,6 +388,7 @@ func DecodeMessage(data []byte) (*TaskMessage, error) {
 		CompletedAt:  pbmsg.GetCompletedAt(),
 		CreatedAt:    pbmsg.GetCreatedAt(),
 		ProcessedAt:  pbmsg.GetProcessedAt(),
+		CanceledAt:   pbmsg.GetCanceledAt(),
 	}, nil
 }
 
@@ -763,7 +788,7 @@ type Broker interface {
 	ReclaimStaleAggregationSets(qname string) error
 
 	// Task retention related method
-	DeleteExpiredCompletedTasks(qname string, batchSize int) error
+	DeleteExpiredCompletedAndCanceledTasks(qname string, batchSize int, preCleanupFunc func(payload []byte) error) error
 
 	// Lease related methods
 	ListLeaseExpired(cutoff time.Time, qnames ...string) ([]*TaskMessage, error)

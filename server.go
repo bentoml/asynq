@@ -103,7 +103,7 @@ type Config struct {
 	// If BaseContext is nil, the default is context.Background().
 	// If this is defined, then it MUST return a non-nil context
 	BaseContext func() context.Context
-	
+
 	// TaskCheckInterval specifies the interval between checks for new tasks to process when all queues are empty.
 	//
 	// If unset, zero or a negative value, the interval is set to 1 second.
@@ -250,6 +250,8 @@ type Config struct {
 	// If unset or zero, default batch size of 100 is used.
 	// Make sure to not put a big number as the batch size to prevent a long-running script.
 	JanitorBatchSize int
+
+	JanitorPreCleanupFunc func(payload []byte) error
 }
 
 // GroupAggregator aggregates a group of tasks into one before the tasks are passed to the Handler.
@@ -577,11 +579,12 @@ func NewServer(r RedisConnOpt, cfg Config) *Server {
 			"This might cause a long-running script", janitorBatchSize, defaultJanitorBatchSize)
 	}
 	janitor := newJanitor(janitorParams{
-		logger:    logger,
-		broker:    rdb,
-		queues:    qnames,
-		interval:  janitorInterval,
-		batchSize: janitorBatchSize,
+		logger:         logger,
+		broker:         rdb,
+		queues:         qnames,
+		interval:       janitorInterval,
+		batchSize:      janitorBatchSize,
+		preCleanupFunc: cfg.JanitorPreCleanupFunc,
 	})
 	aggregator := newAggregator(aggregatorParams{
 		logger:          logger,
