@@ -532,6 +532,8 @@ func TestDequeue(t *testing.T) {
 			t.Errorf("(*RDB).Dequeue(%v) returned error %v", tc.qnames, err)
 			continue
 		}
+		// Zero out ProcessedAt field for comparison.
+		gotMsg.ProcessedAt = 0
 		if !cmp.Equal(gotMsg, tc.wantMsg) {
 			t.Errorf("(*RDB).Dequeue(%v) returned message %v; want %v",
 				tc.qnames, gotMsg, tc.wantMsg)
@@ -550,12 +552,18 @@ func TestDequeue(t *testing.T) {
 		}
 		for queue, want := range tc.wantActive {
 			gotActive := h.GetActiveMessages(t, r.client, queue)
+			for _, msg := range gotActive {
+				msg.ProcessedAt = 0
+			}
 			if diff := cmp.Diff(want, gotActive, h.SortMsgOpt); diff != "" {
 				t.Errorf("mismatch found in %q: (-want,+got):\n%s", base.ActiveKey(queue), diff)
 			}
 		}
 		for queue, want := range tc.wantLease {
 			gotLease := h.GetLeaseEntries(t, r.client, queue)
+			for _, entry := range gotLease {
+				entry.Message.ProcessedAt = 0
+			}
 			if diff := cmp.Diff(want, gotLease, h.SortZSetEntryOpt); diff != "" {
 				t.Errorf("mismatch found in %q: (-want,+got):\n%s", base.LeaseKey(queue), diff)
 			}
@@ -745,6 +753,9 @@ func TestDequeueIgnoresPausedQueues(t *testing.T) {
 		h.SeedAllPendingQueues(t, r.client, tc.pending)
 
 		got, _, err := r.Dequeue(tc.qnames...)
+		if got != nil {
+			got.ProcessedAt = 0
+		}
 		if !cmp.Equal(got, tc.wantMsg) || !errors.Is(err, tc.wantErr) {
 			t.Errorf("Dequeue(%v) = %v, %v; want %v, %v",
 				tc.qnames, got, err, tc.wantMsg, tc.wantErr)
@@ -759,6 +770,9 @@ func TestDequeueIgnoresPausedQueues(t *testing.T) {
 		}
 		for queue, want := range tc.wantActive {
 			gotActive := h.GetActiveMessages(t, r.client, queue)
+			for _, msg := range gotActive {
+				msg.ProcessedAt = 0
+			}
 			if diff := cmp.Diff(want, gotActive, h.SortMsgOpt); diff != "" {
 				t.Errorf("mismatch found in %q: (-want,+got):\n%s", base.ActiveKey(queue), diff)
 			}

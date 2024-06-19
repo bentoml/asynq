@@ -155,6 +155,9 @@ func TestAggregator(t *testing.T) {
 
 		for qname, want := range tc.wantPending {
 			gotPending := h.GetPendingMessages(t, r, qname)
+			for _, msg := range gotPending {
+				msg.CreatedAt = 0
+			}
 			if diff := cmp.Diff(want, gotPending, h.SortMsgOpt, h.IgnoreIDOpt); diff != "" {
 				t.Errorf("%s: mismatch found in %q; (-want,+got)\n%s", tc.desc, base.PendingKey(qname), diff)
 			}

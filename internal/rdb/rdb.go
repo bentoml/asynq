@@ -102,13 +102,26 @@ if redis.call("EXISTS", KEYS[1]) == 1 then
 	return 0
 end
 
-if redis.call("LLEN", KEYS[2]) + redis.call("LLEN", KEYS[3]) + redis.call("LLEN", KEYS[4]) + redis.call("LLEN", KEYS[5]) >= tonumber(ARGV[4]) then
+local current_size = 0
+for i = 2, 5 do
+    if redis.call("TYPE", KEYS[i]).ok == "list" then
+        current_size = current_size + redis.call("LLEN", KEYS[i])
+    end
+end
+
+local queue_size = tonumber(ARGV[4])
+
+if current_size > queue_size then
+    return 1
+end
+ 
+if current_size == queue_size then
     redis.call("HSET", KEYS[1],
                "msg", ARGV[1],
                "state", "queue_full",
                "queue_full_since", ARGV[3])
-		redis.call("LPUSH", KEYS[6], ARGV[2])
-		return 1
+    redis.call("LPUSH", KEYS[6], ARGV[2])
+    return 2
 end
 
 redis.call("HSET", KEYS[1],
@@ -153,6 +166,9 @@ func (r *RDB) Enqueue(ctx context.Context, msg *base.TaskMessage) error {
 	}
 	if n == 0 {
 		return errors.E(op, errors.AlreadyExists, errors.ErrTaskIdConflict)
+	}
+	if n == 1 {
+		return errors.E(op, errors.Full, errors.ErrQueueSizeExceeded)
 	}
 	return nil
 }
