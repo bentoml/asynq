@@ -85,7 +85,10 @@ func (r *RDB) runScriptWithErrorCode(ctx context.Context, op errors.Op, script *
 // Input:
 // KEYS[1] -> asynq:{<qname>}:t:<task_id>
 // KEYS[2] -> asynq:{<qname>}:pending
-// KEYS[3] -> asynq:{<qname>}:queue_full
+// KEYS[3] -> asynq:{<qname>}:active
+// KEYS[4] -> asynq:{<qname>}:scheduled
+// KEYS[5] -> asynq:{<qname>}:paused
+// KEYS[6] -> asynq:{<qname>}:queue_full
 // --
 // ARGV[1] -> task message data
 // ARGV[2] -> task ID
@@ -94,7 +97,7 @@ func (r *RDB) runScriptWithErrorCode(ctx context.Context, op errors.Op, script *
 //
 // Output:
 // Returns 2 if successfully enqueued
-// Returns 1 if successfully enqueued to queue_full
+// Returns 1 if the queue is full
 // Returns 0 if task ID already exists
 
 var enqueueCmd = redis.NewScript(`
