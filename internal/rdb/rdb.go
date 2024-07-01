@@ -85,24 +85,54 @@ func (r *RDB) runScriptWithErrorCode(ctx context.Context, op errors.Op, script *
 // Input:
 // KEYS[1] -> asynq:{<qname>}:t:<task_id>
 // KEYS[2] -> asynq:{<qname>}:pending
+// KEYS[3] -> asynq:{<qname>}:active
+// KEYS[4] -> asynq:{<qname>}:scheduled
+// KEYS[5] -> asynq:{<qname>}:paused
+// KEYS[6] -> asynq:{<qname>}:queue_full
 // --
 // ARGV[1] -> task message data
 // ARGV[2] -> task ID
 // ARGV[3] -> current unix time in nsec
+// ARGV[4] -> queue size
 //
 // Output:
-// Returns 1 if successfully enqueued
+// Returns 2 if successfully enqueued
+// Returns 1 if the queue is full
 // Returns 0 if task ID already exists
+
 var enqueueCmd = redis.NewScript(`
 if redis.call("EXISTS", KEYS[1]) == 1 then
 	return 0
 end
+
+local current_size = 0
+for i = 2, 5 do
+    if redis.call("TYPE", KEYS[i]).ok == "list" then
+        current_size = current_size + redis.call("LLEN", KEYS[i])
+    end
+end
+
+local queue_size = tonumber(ARGV[4])
+
+if current_size > queue_size then
+    return 1
+end
+ 
+if current_size == queue_size then
+    redis.call("HSET", KEYS[1],
+               "msg", ARGV[1],
+               "state", "queue_full",
+               "queue_full_since", ARGV[3])
+    redis.call("LPUSH", KEYS[6], ARGV[2])
+    return 2
+end
+
 redis.call("HSET", KEYS[1],
            "msg", ARGV[1],
            "state", "pending",
            "pending_since", ARGV[3])
 redis.call("LPUSH", KEYS[2], ARGV[2])
-return 1
+return 2
 `)
 
 // Enqueue adds the given task to the pending list of the queue.
@@ -118,11 +148,20 @@ func (r *RDB) Enqueue(ctx context.Context, msg *base.TaskMessage) error {
 	keys := []string{
 		base.TaskKey(msg.Queue, msg.ID),
 		base.PendingKey(msg.Queue),
+		base.ActiveKey(msg.Queue),
+		base.ScheduledKey(msg.Queue),
+		base.PausedKey(msg.Queue),
+		base.QueueFullKey(msg.Queue),
+	}
+	queueSize := msg.QueueSize
+	if queueSize == 0 {
+		queueSize = base.DefaultQueueSize
 	}
 	argv := []interface{}{
 		encoded,
 		msg.ID,
 		r.clock.Now().UnixNano(),
+		queueSize,
 	}
 	n, err := r.runScriptWithErrorCode(ctx, op, enqueueCmd, keys, argv...)
 	if err != nil {
@@ -130,6 +169,9 @@ func (r *RDB) Enqueue(ctx context.Context, msg *base.TaskMessage) error {
 	}
 	if n == 0 {
 		return errors.E(op, errors.AlreadyExists, errors.ErrTaskIdConflict)
+	}
+	if n == 1 {
+		return errors.E(op, errors.Full, errors.ErrQueueSizeExceeded)
 	}
 	return nil
 }
@@ -201,6 +243,48 @@ func (r *RDB) EnqueueUnique(ctx context.Context, msg *base.TaskMessage, ttl time
 	return nil
 }
 
+// findAndPendingQueueFullTaskCmd finds a task in the queue and marks it as pending.
+//
+// KEYS[1] -> asynq:{<qname>}:queue_full
+// KEYS[2] -> asynq:{<qname>}:t:
+// KEYS[3] -> asynq:{<qname>}:pending
+// --
+// ARGV[1] -> current unix time in nsec
+//
+// Output:
+// Returns 1 if a task is found and marked as pending.
+// Returns 0 if no task is found.
+var findAndPendingQueueFullTaskCmd = redis.NewScript(`
+local taskID = redis.call("LPOP", KEYS[1])
+if not taskID then
+    return 0
+end
+
+local taskKey = KEYS[2] .. taskID
+redis.call("HSET", taskKey, "state", "pending", "pending_since", ARGV[1])
+redis.call("LPUSH", KEYS[3], taskID)
+return 1
+`)
+
+// FindAndPendingQueueFullTask finds a task in the queue and marks it as pending.
+func (r *RDB) FindAndPendingQueueFullTask(ctx context.Context, queue string) error {
+	var op errors.Op = "rdb.FindAndPendingQueueFullTask"
+	now := r.clock.Now().UnixNano()
+
+	keys := []string{
+		base.QueueFullKey(queue),
+		base.TaskKeyPrefix(queue),
+		base.PendingKey(queue),
+	}
+	argv := []interface{}{now}
+	_, err := r.runScriptWithErrorCode(ctx, op, findAndPendingQueueFullTaskCmd, keys, argv...)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
 // Input:
 // KEYS[1] -> asynq:{<qname>}:pending
 // KEYS[2] -> asynq:{<qname>}:paused
@@ -259,6 +343,14 @@ func (r *RDB) Dequeue(qnames ...string) (msg *base.TaskMessage, leaseExpirationT
 		}
 		if msg, err = base.DecodeMessage([]byte(encoded)); err != nil {
 			return nil, time.Time{}, errors.E(op, errors.Internal, fmt.Sprintf("cannot decode message: %v", err))
+		}
+		msg.ProcessedAt = time.Now().Unix()
+		updatedMsg, err := base.EncodeMessage(msg)
+		if err != nil {
+			return nil, time.Time{}, errors.E(op, errors.Internal, fmt.Sprintf("cannot encode updated message: %v", err))
+		}
+		if err = r.client.HSet(context.Background(), base.TaskKey(qname, msg.ID), "msg", updatedMsg).Err(); err != nil {
+			return nil, time.Time{}, errors.E(op, errors.Unknown, fmt.Sprintf("failed to update task message: %v", err))
 		}
 		return msg, leaseExpirationTime, nil
 	}
@@ -1226,26 +1318,50 @@ func (r *RDB) ReclaimStaleAggregationSets(qname string) error {
 }
 
 // KEYS[1] -> asynq:{<qname>}:completed
+// KEYS[2] -> asynq:{<qname>}:canceled
 // ARGV[1] -> current time in unix time
 // ARGV[2] -> task key prefix
 // ARGV[3] -> batch size (i.e. maximum number of tasks to delete)
 //
 // Returns the number of tasks deleted.
-var deleteExpiredCompletedTasksCmd = redis.NewScript(`
-local ids = redis.call("ZRANGEBYSCORE", KEYS[1], "-inf", ARGV[1], "LIMIT", 0, tonumber(ARGV[3]))
-for _, id in ipairs(ids) do
-	redis.call("DEL", ARGV[2] .. id)
-	redis.call("ZREM", KEYS[1], id)
+var deleteExpiredCompletedAndCanceledTasksCmd = redis.NewScript(`
+local function delete_expired_tasks(set_key)
+  local ids = redis.call("ZRANGEBYSCORE", set_key, "-inf", ARGV[1], "LIMIT", 0, tonumber(ARGV[3]))
+  for _, id in ipairs(ids) do
+    redis.call("DEL", ARGV[2] .. id)
+    redis.call("ZREM", set_key, id)
+  end
+  return ids
 end
-return table.getn(ids)`)
 
-// DeleteExpiredCompletedTasks checks for any expired tasks in the given queue's completed set,
+local completed_ids = delete_expired_tasks(KEYS[1])
+local canceled_ids = delete_expired_tasks(KEYS[2])
+
+return table.getn(completed_ids) + table.getn(canceled_ids)`)
+
+// DeleteExpiredCompletedAndCanceledTasks checks for any expired tasks in the given queue's completed set,
 // and delete all expired tasks.
-func (r *RDB) DeleteExpiredCompletedTasks(qname string, batchSize int) error {
+func (r *RDB) DeleteExpiredCompletedAndCanceledTasks(qname string, batchSize int, preCleanup func(payload []byte) error) error {
 	for {
-		n, err := r.deleteExpiredCompletedTasks(qname, batchSize)
+		errs := make([]string, 0)
+		if preCleanup != nil {
+			msgs, err := r.ListExpiredCompletedAndCanceledTasks(qname, batchSize)
+			if err != nil {
+				return fmt.Errorf("list expired tasks failed: %v", err)
+			}
+			for _, msg := range msgs {
+				err := preCleanup(msg.Payload)
+				if err != nil {
+					errs = append(errs, err.Error())
+				}
+			}
+		}
+		n, err := r.deleteExpiredCompletedAndCanceledTasks(qname, batchSize)
 		if err != nil {
-			return err
+			return fmt.Errorf("delete failed: %v", err)
+		}
+		if len(errs) > 0 {
+			return fmt.Errorf("pre-cleanup failed: %v", errs)
 		}
 		if n == 0 {
 			return nil
@@ -1253,17 +1369,73 @@ func (r *RDB) DeleteExpiredCompletedTasks(qname string, batchSize int) error {
 	}
 }
 
-// deleteExpiredCompletedTasks runs the lua script to delete expired deleted task with the specified
-// batch size. It reports the number of tasks deleted.
-func (r *RDB) deleteExpiredCompletedTasks(qname string, batchSize int) (int64, error) {
-	var op errors.Op = "rdb.DeleteExpiredCompletedTasks"
-	keys := []string{base.CompletedKey(qname)}
+// KEYS[1] -> asynq:{<qname>}:completed
+// KEYS[2] -> asynq:{<qname>}:canceled
+var listExpiredCompletedAndCanceledTasksCmd = redis.NewScript(`
+local res = {}
+
+local function list_expired_tasks(set_key)
+  local ids = redis.call("ZRANGEBYSCORE", set_key, "-inf", ARGV[1], "LIMIT", 0, tonumber(ARGV[3]))
+  for _, id in ipairs(ids) do
+    local key = ARGV[2] .. id
+    local v = redis.call("HGET", key, "msg")
+    if v then
+      table.insert(res, v)
+    end
+  end
+end
+
+list_expired_tasks(KEYS[1])
+list_expired_tasks(KEYS[2])
+
+return res
+`)
+
+// ListExpiredCompletedAndCanceledTasks returns a list of task messages with an expired completed or canceled state.
+func (r *RDB) ListExpiredCompletedAndCanceledTasks(qname string, batchSize int) ([]*base.TaskMessage, error) {
+	var op errors.Op = "rdb.ListExpiredCompletedAndCanceledTasks"
+	var msgs []*base.TaskMessage
+	keys := []string{
+		base.CompletedKey(qname),
+		base.CanceledKey(qname),
+	}
 	argv := []interface{}{
 		r.clock.Now().Unix(),
 		base.TaskKeyPrefix(qname),
 		batchSize,
 	}
-	res, err := deleteExpiredCompletedTasksCmd.Run(context.Background(), r.client, keys, argv...).Result()
+	res, err := listExpiredCompletedAndCanceledTasksCmd.Run(context.Background(), r.client, keys, argv...).Result()
+	if err != nil {
+		return nil, errors.E(op, errors.Internal, fmt.Sprintf("redis eval error: %v", err))
+	}
+	data, err := cast.ToStringSliceE(res)
+	if err != nil {
+		return nil, errors.E(op, errors.Internal, fmt.Sprintf("cast error: Lua script returned unexpected value: %v", res))
+	}
+	for _, s := range data {
+		msg, err := base.DecodeMessage([]byte(s))
+		if err != nil {
+			return nil, errors.E(op, errors.Internal, fmt.Sprintf("cannot decode message: %v", err))
+		}
+		msgs = append(msgs, msg)
+	}
+	return msgs, nil
+}
+
+// deleteExpiredCompletedAndCanceledTasks runs the lua script to delete expired deleted task with the specified
+// batch size. It reports the number of tasks deleted.
+func (r *RDB) deleteExpiredCompletedAndCanceledTasks(qname string, batchSize int) (int64, error) {
+	var op errors.Op = "rdb.DeleteExpiredCompletedAndCanceledTasks"
+	keys := []string{
+		base.CompletedKey(qname),
+		base.CanceledKey(qname),
+	}
+	argv := []interface{}{
+		r.clock.Now().Unix(),
+		base.TaskKeyPrefix(qname),
+		batchSize,
+	}
+	res, err := deleteExpiredCompletedAndCanceledTasksCmd.Run(context.Background(), r.client, keys, argv...).Result()
 	if err != nil {
 		return 0, errors.E(op, errors.Internal, fmt.Sprintf("redis eval error: %v", err))
 	}
@@ -1517,6 +1689,17 @@ func (r *RDB) WriteResult(qname, taskID string, data []byte) (int, error) {
 	taskKey := base.TaskKey(qname, taskID)
 	if err := r.client.HSet(ctx, taskKey, "result", data).Err(); err != nil {
 		return 0, errors.E(op, errors.Unknown, &errors.RedisCommandError{Command: "hset", Err: err})
+	}
+	return len(data), nil
+}
+
+// Publish publishes the given task message to the specified channel.
+func (r *RDB) Publish(qname, taskID string, data []byte) (int, error) {
+	var op errors.Op = "rdb.Publish"
+	ctx := context.Background()
+	taskKey := base.TaskKey(qname, taskID)
+	if err := r.client.Publish(ctx, taskKey, data).Err(); err != nil {
+		return 0, errors.E(op, errors.Unknown, &errors.RedisCommandError{Command: "publish", Err: err})
 	}
 	return len(data), nil
 }

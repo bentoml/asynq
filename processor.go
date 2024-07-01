@@ -276,6 +276,8 @@ func (p *processor) handleSucceededMessage(l *base.Lease, msg *base.TaskMessage)
 	} else {
 		p.markAsDone(l, msg)
 	}
+	ctx, _ := context.WithDeadline(context.Background(), l.Deadline())
+	p.broker.FindAndPendingQueueFullTask(ctx, msg.Queue)
 }
 
 func (p *processor) markAsComplete(l *base.Lease, msg *base.TaskMessage) {
@@ -335,6 +337,7 @@ func (p *processor) handleFailedMessage(ctx context.Context, l *base.Lease, msg 
 	if msg.Retried >= msg.Retry || errors.Is(err, SkipRetry) {
 		p.logger.Warnf("Retry exhausted for task id=%s", msg.ID)
 		p.archive(l, msg, err)
+		p.broker.FindAndPendingQueueFullTask(ctx, msg.Queue)
 	} else {
 		p.retry(l, msg, err, true /*isFailure*/)
 	}

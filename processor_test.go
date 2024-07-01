@@ -376,6 +376,9 @@ func TestProcessorRetry(t *testing.T) {
 
 		cmpOpt := h.EquateInt64Approx(int64(tc.wait.Seconds())) // allow up to a wait-second difference in zset score
 		gotRetry := h.GetRetryEntries(t, r, base.DefaultQueueName)
+		for _, msg := range gotRetry {
+			msg.Message.ProcessedAt = 0
+		}
 		var wantRetry []base.Z // Note: construct wantRetry here since `LastFailedAt` and ZSCORE is relative to each test run.
 		for _, msg := range tc.wantRetry {
 			wantRetry = append(wantRetry,
@@ -389,6 +392,9 @@ func TestProcessorRetry(t *testing.T) {
 		}
 
 		gotArchived := h.GetArchivedEntries(t, r, base.DefaultQueueName)
+		for _, msg := range gotArchived {
+			msg.Message.ProcessedAt = 0
+		}
 		var wantArchived []base.Z // Note: construct wantArchived here since `LastFailedAt` and ZSCORE is relative to each test run.
 		for _, msg := range tc.wantArchived {
 			wantArchived = append(wantArchived,
@@ -472,6 +478,9 @@ func TestProcessorMarkAsComplete(t *testing.T) {
 
 		for qname, want := range tc.wantPending {
 			gotPending := h.GetPendingMessages(t, r, qname)
+			for _, msg := range gotPending {
+				msg.ProcessedAt = 0
+			}
 			if diff := cmp.Diff(want, gotPending, cmpopts.EquateEmpty()); diff != "" {
 				t.Errorf("diff found in %q pending set; want=%v, got=%v\n%s", qname, want, gotPending, diff)
 			}
@@ -479,6 +488,9 @@ func TestProcessorMarkAsComplete(t *testing.T) {
 
 		for qname, want := range tc.wantCompleted(runTime) {
 			gotCompleted := h.GetCompletedEntries(t, r, qname)
+			for _, msg := range gotCompleted {
+				msg.Message.ProcessedAt = 0
+			}
 			if diff := cmp.Diff(want, gotCompleted, cmpopts.EquateEmpty()); diff != "" {
 				t.Errorf("diff found in %q completed set; want=%v, got=%v\n%s", qname, want, gotCompleted, diff)
 			}

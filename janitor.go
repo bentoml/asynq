@@ -30,24 +30,28 @@ type janitor struct {
 
 	// number of tasks to be deleted when janitor runs to delete the expired completed tasks.
 	batchSize int
+
+	preCleanupFunc func(payload []byte) error
 }
 
 type janitorParams struct {
-	logger    *log.Logger
-	broker    base.Broker
-	queues    []string
-	interval  time.Duration
-	batchSize int
+	logger         *log.Logger
+	broker         base.Broker
+	queues         []string
+	interval       time.Duration
+	batchSize      int
+	preCleanupFunc func(payload []byte) error
 }
 
 func newJanitor(params janitorParams) *janitor {
 	return &janitor{
-		logger:      params.logger,
-		broker:      params.broker,
-		done:        make(chan struct{}),
-		queues:      params.queues,
-		avgInterval: params.interval,
-		batchSize:   params.batchSize,
+		logger:         params.logger,
+		broker:         params.broker,
+		done:           make(chan struct{}),
+		queues:         params.queues,
+		avgInterval:    params.interval,
+		batchSize:      params.batchSize,
+		preCleanupFunc: params.preCleanupFunc,
 	}
 }
 
@@ -78,8 +82,8 @@ func (j *janitor) start(wg *sync.WaitGroup) {
 
 func (j *janitor) exec() {
 	for _, qname := range j.queues {
-		if err := j.broker.DeleteExpiredCompletedTasks(qname, j.batchSize); err != nil {
-			j.logger.Errorf("Failed to delete expired completed tasks from queue %q: %v",
+		if err := j.broker.DeleteExpiredCompletedAndCanceledTasks(qname, j.batchSize, j.preCleanupFunc); err != nil {
+			j.logger.Errorf("Failed to delete expired completed and canceled tasks from queue %q: %v",
 				qname, err)
 		}
 	}

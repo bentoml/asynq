@@ -14,8 +14,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/redis/go-redis/v9"
 	"github.com/hibiken/asynq/internal/base"
+	"github.com/redis/go-redis/v9"
 )
 
 // Task represents a unit of work to be performed.
@@ -121,9 +121,20 @@ type TaskInfo struct {
 	// Retention is duration of the retention period after the task is successfully processed.
 	Retention time.Duration
 
+	// CreatedAt is the time when the task was created.
+	CreatedAt time.Time
+
 	// CompletedAt is the time when the task is processed successfully.
 	// Zero value (i.e. time.Time{}) indicates no value.
 	CompletedAt time.Time
+
+	// ProcessedAt is the time when the task is processed.
+	// Zero value (i.e. time.Time{}) indicates no value.
+	ProcessedAt time.Time
+
+	// CanceledAt is the time when the task is canceled.
+	// Zero value (i.e. time.Time{}) indicates no value.
+	CanceledAt time.Time
 
 	// Result holds the result data associated with the task.
 	// Use ResultWriter to write result data from the Handler.
@@ -154,7 +165,10 @@ func newTaskInfo(msg *base.TaskMessage, state base.TaskState, nextProcessAt time
 		Retention:     time.Duration(msg.Retention) * time.Second,
 		NextProcessAt: nextProcessAt,
 		LastFailedAt:  fromUnixTimeOrZero(msg.LastFailedAt),
+		CreatedAt:     fromUnixTimeOrZero(msg.CreatedAt),
 		CompletedAt:   fromUnixTimeOrZero(msg.CompletedAt),
+		ProcessedAt:   fromUnixTimeOrZero(msg.ProcessedAt),
+		CanceledAt:    fromUnixTimeOrZero(msg.CanceledAt),
 		Result:        result,
 	}
 
@@ -173,6 +187,10 @@ func newTaskInfo(msg *base.TaskMessage, state base.TaskState, nextProcessAt time
 		info.State = TaskStateCompleted
 	case base.TaskStateAggregating:
 		info.State = TaskStateAggregating
+	case base.TaskStateQueueFull:
+		info.State = TaskStateQueueFull
+	case base.TaskStateCanceled:
+		info.State = TaskStateCanceled
 	default:
 		panic(fmt.Sprintf("internal error: unknown state: %d", state))
 	}
@@ -203,6 +221,12 @@ const (
 
 	// Indicates that the task is waiting in a group to be aggregated into one task.
 	TaskStateAggregating
+
+	// Indicates that the task queue is full and the task is waiting to be processed.
+	TaskStateQueueFull
+
+	// Indicates that the task is canceled and will not be processed.
+	TaskStateCanceled
 )
 
 func (s TaskState) String() string {
@@ -221,6 +245,10 @@ func (s TaskState) String() string {
 		return "completed"
 	case TaskStateAggregating:
 		return "aggregating"
+	case TaskStateQueueFull:
+		return "queue_full"
+	case TaskStateCanceled:
+		return "canceled"
 	}
 	panic("asynq: unknown task state")
 }
@@ -438,10 +466,11 @@ func (opt RedisClusterClientOpt) MakeRedisClient() interface{} {
 //
 // Three URI schemes are supported, which are redis:, rediss:, redis-socket:, and redis-sentinel:.
 // Supported formats are:
-//     redis://[:password@]host[:port][/dbnumber]
-//     rediss://[:password@]host[:port][/dbnumber]
-//     redis-socket://[:password@]path[?db=dbnumber]
-//     redis-sentinel://[:password@]host1[:port][,host2:[:port]][,hostN:[:port]][?master=masterName]
+//
+//	redis://[:password@]host[:port][/dbnumber]
+//	rediss://[:password@]host[:port][/dbnumber]
+//	redis-socket://[:password@]path[?db=dbnumber]
+//	redis-sentinel://[:password@]host1[:port][,host2:[:port]][,hostN:[:port]][?master=masterName]
 func ParseRedisURI(uri string) (RedisConnOpt, error) {
 	u, err := url.Parse(uri)
 	if err != nil {
@@ -535,10 +564,20 @@ type ResultWriter struct {
 func (w *ResultWriter) Write(data []byte) (n int, err error) {
 	select {
 	case <-w.ctx.Done():
-		return 0, fmt.Errorf("failed to result task result: %v", w.ctx.Err())
+		return 0, fmt.Errorf("failed to write task result: %v", w.ctx.Err())
 	default:
 	}
 	return w.broker.WriteResult(w.qname, w.id, data)
+}
+
+// Publish publishes the given data to the task channel.
+func (w *ResultWriter) Publish(data []byte) (n int, err error) {
+	select {
+	case <-w.ctx.Done():
+		return 0, fmt.Errorf("failed to publish task result: %v", w.ctx.Err())
+	default:
+	}
+	return w.broker.Publish(w.qname, w.id, data)
 }
 
 // TaskID returns the ID of the task the ResultWriter is associated with.

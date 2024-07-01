@@ -62,6 +62,128 @@ func setup(tb testing.TB) (r *RDB) {
 	return r
 }
 
+func TestCancelTask(t *testing.T) {
+	r := setup(t)
+	defer r.Close()
+	queueName := "cancelTask"
+	t1 := h.NewTaskMessageWithQueue(queueName, nil, queueName)
+	t1.QueueSize = 1
+	t2 := h.NewTaskMessageWithQueue(queueName, nil, queueName)
+	t2.QueueSize = 1
+
+	enqueueTime := time.Now()
+	r.SetClock(timeutil.NewSimulatedClock(enqueueTime))
+	h.FlushDB(t, r.client)
+	ctx := context.Background()
+	err := r.Enqueue(ctx, t1)
+	if err != nil {
+		t.Errorf("(*RDB).Enqueue(msg) = %v, want nil", err)
+	}
+	err = r.Enqueue(ctx, t2)
+	if err != nil {
+		t.Errorf("(*RDB).Enqueue(msg) = %v, want nil", err)
+	}
+	pendingKey := base.PendingKey(queueName)
+	pendingIDs := r.client.LRange(context.Background(), pendingKey, 0, -1).Val()
+	if n := len(pendingIDs); n != 1 {
+		t.Errorf("Redis LIST %q contains %d IDs, want 1", pendingKey, n)
+	}
+	queueFullKey := base.QueueFullKey(queueName)
+	queueFullIDs := r.client.LRange(context.Background(), queueFullKey, 0, -1).Val()
+	if n := len(queueFullIDs); n != 1 {
+		t.Errorf("Redis LIST %q contains %d IDs, want 1", queueFullKey, n)
+	}
+	err = r.CancelTask(queueName, t1.ID)
+	if err != nil {
+		t.Errorf("(*RDB).CancelTask(queueName, t1.ID) = %v, want nil", err)
+	}
+	pendingIDs = r.client.LRange(context.Background(), pendingKey, 0, -1).Val()
+	if n := len(pendingIDs); n != 0 {
+		t.Errorf("Redis LIST %q contains %d IDs, want 0", pendingKey, n)
+	}
+	err = r.CancelTask(queueName, t2.ID)
+	if err != nil {
+		t.Errorf("(*RDB).CancelTask(queueName, t2.ID) = %v, want nil", err)
+	}
+	queueFullIDs = r.client.LRange(context.Background(), queueFullKey, 0, -1).Val()
+	if n := len(queueFullIDs); n != 0 {
+		t.Errorf("Redis LIST %q contains %d IDs, want 0", queueFullKey, n)
+	}
+	canceledKey := base.CanceledKey(queueName)
+	canceledIDs := r.client.ZRange(context.Background(), canceledKey, 0, -1).Val()
+	if n := len(canceledIDs); n != 2 {
+		t.Errorf("Redis LIST %q contains %d IDs, want 2", canceledKey, n)
+	}
+
+	t3 := h.NewTaskMessageWithQueue(queueName, nil, queueName)
+	err = r.Schedule(ctx, t3, time.Now())
+	if err != nil {
+		t.Errorf("(*RDB).Schedule(msg, time.Now()) = %v, want nil", err)
+	}
+	err = r.CancelTask(queueName, t3.ID)
+	if err != nil {
+		if !strings.Contains(err.Error(), "pending") {
+			t.Errorf("(*RDB).CancelTask(queueName, t3.ID) = %v, want task is not in pending state", err)
+		}
+	}
+
+	err = r.CancelTask(queueName, "nonexistent-id")
+	if err != nil {
+		if !strings.Contains(err.Error(), "not find") {
+			t.Errorf("(*RDB).CancelTask(queueName, nonexistent-id) = %v, want task not found", err)
+		}
+	}
+}
+
+func TestEnqueueWithQueueSize(t *testing.T) {
+	r := setup(t)
+	defer r.Close()
+	queueName := "queue_size"
+	t1 := h.NewTaskMessageWithQueue(queueName, nil, queueName)
+	t1.QueueSize = 1
+	t2 := h.NewTaskMessageWithQueue(queueName, nil, queueName)
+	t2.QueueSize = 1
+
+	enqueueTime := time.Now()
+	r.SetClock(timeutil.NewSimulatedClock(enqueueTime))
+	h.FlushDB(t, r.client)
+	ctx := context.Background()
+	err := r.Enqueue(ctx, t1)
+	if err != nil {
+		t.Errorf("(*RDB).Enqueue(msg) = %v, want nil", err)
+	}
+	err = r.Enqueue(ctx, t2)
+	if err != nil {
+		t.Errorf("(*RDB).Enqueue(msg) = %v, want nil", err)
+	}
+	pendingKey := base.PendingKey(queueName)
+	pendingIDs := r.client.LRange(context.Background(), pendingKey, 0, -1).Val()
+	if n := len(pendingIDs); n != 1 {
+		t.Errorf("Redis LIST %q contains %d IDs, want 1", pendingKey, n)
+	}
+	// check queue full key
+	queueFullKey := base.QueueFullKey(queueName)
+	queueFullIDs := r.client.LRange(context.Background(), queueFullKey, 0, -1).Val()
+	if n := len(queueFullIDs); n != 1 {
+		t.Errorf("Redis LIST %q contains %d IDs, want 1", queueFullKey, n)
+	}
+
+	// check find and pending queue full task
+	err = r.FindAndPendingQueueFullTask(ctx, queueName)
+	if err != nil {
+		t.Errorf("(*RDB).FindAndPendingQueueFullTask(queueName) = %v, want nil", err)
+	}
+	pendingIDs = r.client.LRange(context.Background(), pendingKey, 0, -1).Val()
+	if n := len(pendingIDs); n != 2 {
+		t.Errorf("Redis LIST %q contains %d IDs, want 2", pendingKey, n)
+	}
+	// check queue full key
+	queueFullIDs = r.client.LRange(context.Background(), queueFullKey, 0, -1).Val()
+	if n := len(queueFullIDs); n != 0 {
+		t.Errorf("Redis LIST %q contains %d IDs, want 0", queueFullKey, n)
+	}
+}
+
 func TestEnqueue(t *testing.T) {
 	r := setup(t)
 	defer r.Close()
@@ -410,6 +532,8 @@ func TestDequeue(t *testing.T) {
 			t.Errorf("(*RDB).Dequeue(%v) returned error %v", tc.qnames, err)
 			continue
 		}
+		// Zero out ProcessedAt field for comparison.
+		gotMsg.ProcessedAt = 0
 		if !cmp.Equal(gotMsg, tc.wantMsg) {
 			t.Errorf("(*RDB).Dequeue(%v) returned message %v; want %v",
 				tc.qnames, gotMsg, tc.wantMsg)
@@ -428,12 +552,18 @@ func TestDequeue(t *testing.T) {
 		}
 		for queue, want := range tc.wantActive {
 			gotActive := h.GetActiveMessages(t, r.client, queue)
+			for _, msg := range gotActive {
+				msg.ProcessedAt = 0
+			}
 			if diff := cmp.Diff(want, gotActive, h.SortMsgOpt); diff != "" {
 				t.Errorf("mismatch found in %q: (-want,+got):\n%s", base.ActiveKey(queue), diff)
 			}
 		}
 		for queue, want := range tc.wantLease {
 			gotLease := h.GetLeaseEntries(t, r.client, queue)
+			for _, entry := range gotLease {
+				entry.Message.ProcessedAt = 0
+			}
 			if diff := cmp.Diff(want, gotLease, h.SortZSetEntryOpt); diff != "" {
 				t.Errorf("mismatch found in %q: (-want,+got):\n%s", base.LeaseKey(queue), diff)
 			}
@@ -623,6 +753,9 @@ func TestDequeueIgnoresPausedQueues(t *testing.T) {
 		h.SeedAllPendingQueues(t, r.client, tc.pending)
 
 		got, _, err := r.Dequeue(tc.qnames...)
+		if got != nil {
+			got.ProcessedAt = 0
+		}
 		if !cmp.Equal(got, tc.wantMsg) || !errors.Is(err, tc.wantErr) {
 			t.Errorf("Dequeue(%v) = %v, %v; want %v, %v",
 				tc.qnames, got, err, tc.wantMsg, tc.wantErr)
@@ -637,6 +770,9 @@ func TestDequeueIgnoresPausedQueues(t *testing.T) {
 		}
 		for queue, want := range tc.wantActive {
 			gotActive := h.GetActiveMessages(t, r.client, queue)
+			for _, msg := range gotActive {
+				msg.ProcessedAt = 0
+			}
 			if diff := cmp.Diff(want, gotActive, h.SortMsgOpt); diff != "" {
 				t.Errorf("mismatch found in %q: (-want,+got):\n%s", base.ActiveKey(queue), diff)
 			}
@@ -2475,7 +2611,13 @@ func newCompletedTask(qname, typename string, payload []byte, completedAt time.T
 	return msg
 }
 
-func TestDeleteExpiredCompletedTasks(t *testing.T) {
+func newCanceledTask(qname, typename string, payload []byte, canceledAt time.Time) *base.TaskMessage {
+	msg := h.NewTaskMessageWithQueue(typename, payload, qname)
+	msg.CanceledAt = canceledAt.Unix()
+	return msg
+}
+
+func TestDeleteExpiredCompletedAndCanceledTasks(t *testing.T) {
 	r := setup(t)
 	defer r.Close()
 	now := time.Now()
@@ -2489,12 +2631,15 @@ func TestDeleteExpiredCompletedTasks(t *testing.T) {
 	t3 := newCompletedTask("default", "task3", nil, secondAgo)
 	t4 := newCompletedTask("critical", "critical_task", nil, hourAgo)
 	t5 := newCompletedTask("low", "low_priority_task", nil, hourAgo)
+	t6 := newCanceledTask("default", "canceled_task", nil, hourAgo)
 
 	tests := []struct {
 		desc          string
 		completed     map[string][]base.Z
+		canceled      map[string][]base.Z
 		qname         string
 		wantCompleted map[string][]base.Z
+		wantCanceled  map[string][]base.Z
 	}{
 		{
 			desc: "deletes expired task from default queue",
@@ -2505,10 +2650,20 @@ func TestDeleteExpiredCompletedTasks(t *testing.T) {
 					{Message: t3, Score: now.Unix()},
 				},
 			},
+			canceled: map[string][]base.Z{
+				"default": {
+					{Message: t6, Score: hourFromNow.Unix()},
+				},
+			},
 			qname: "default",
 			wantCompleted: map[string][]base.Z{
 				"default": {
 					{Message: t2, Score: hourFromNow.Unix()},
+				},
+			},
+			wantCanceled: map[string][]base.Z{
+				"default": {
+					{Message: t6, Score: hourFromNow.Unix()},
 				},
 			},
 		},
@@ -2541,8 +2696,9 @@ func TestDeleteExpiredCompletedTasks(t *testing.T) {
 	for _, tc := range tests {
 		h.FlushDB(t, r.client)
 		h.SeedAllCompletedQueues(t, r.client, tc.completed)
+		h.SeedAllCanceledQueues(t, r.client, tc.canceled)
 
-		if err := r.DeleteExpiredCompletedTasks(tc.qname, 100); err != nil {
+		if err := r.DeleteExpiredCompletedAndCanceledTasks(tc.qname, 100, nil); err != nil {
 			t.Errorf("DeleteExpiredCompletedTasks(%q, 100) failed: %v", tc.qname, err)
 			continue
 		}
@@ -2551,6 +2707,12 @@ func TestDeleteExpiredCompletedTasks(t *testing.T) {
 			got := h.GetCompletedEntries(t, r.client, qname)
 			if diff := cmp.Diff(want, got, h.SortZSetEntryOpt); diff != "" {
 				t.Errorf("%s: diff found in %q completed set: want=%v, got=%v\n%s", tc.desc, qname, want, got, diff)
+			}
+		}
+		for qname, want := range tc.wantCanceled {
+			got := h.GetCanceledEntries(t, r.client, qname)
+			if diff := cmp.Diff(want, got, h.SortZSetEntryOpt); diff != "" {
+				t.Errorf("%s: diff found in %q canceled set: want=%v, got=%v\n%s", tc.desc, qname, want, got, diff)
 			}
 		}
 	}

@@ -123,6 +123,7 @@ func TestClientEnqueueWithProcessAtOption(t *testing.T) {
 			cmpopts.IgnoreFields(TaskInfo{}, "ID"),
 			cmpopts.EquateApproxTime(500 * time.Millisecond),
 		}
+		gotInfo.CreatedAt = time.Time{}
 		if diff := cmp.Diff(tc.wantInfo, gotInfo, cmpOptions...); diff != "" {
 			t.Errorf("%s;\nEnqueue(task, ProcessAt(%v)) returned %v, want %v; (-want,+got)\n%s",
 				tc.desc, tc.processAt, gotInfo, tc.wantInfo, diff)
@@ -130,12 +131,18 @@ func TestClientEnqueueWithProcessAtOption(t *testing.T) {
 
 		for qname, want := range tc.wantPending {
 			gotPending := h.GetPendingMessages(t, r, qname)
+			for _, msg := range gotPending {
+				msg.CreatedAt = 0
+			}
 			if diff := cmp.Diff(want, gotPending, h.IgnoreIDOpt, cmpopts.EquateEmpty()); diff != "" {
 				t.Errorf("%s;\nmismatch found in %q; (-want,+got)\n%s", tc.desc, base.PendingKey(qname), diff)
 			}
 		}
 		for qname, want := range tc.wantScheduled {
 			gotScheduled := h.GetScheduledEntries(t, r, qname)
+			for _, entry := range gotScheduled {
+				entry.Message.CreatedAt = 0
+			}
 			if diff := cmp.Diff(want, gotScheduled, h.IgnoreIDOpt, cmpopts.EquateEmpty()); diff != "" {
 				t.Errorf("%s;\nmismatch found in %q; (-want,+got)\n%s", tc.desc, base.ScheduledKey(qname), diff)
 			}
@@ -464,6 +471,7 @@ func TestClientEnqueue(t *testing.T) {
 			cmpopts.IgnoreFields(TaskInfo{}, "ID"),
 			cmpopts.EquateApproxTime(500 * time.Millisecond),
 		}
+		gotInfo.CreatedAt = time.Time{}
 		if diff := cmp.Diff(tc.wantInfo, gotInfo, cmpOptions...); diff != "" {
 			t.Errorf("%s;\nEnqueue(task) returned %v, want %v; (-want,+got)\n%s",
 				tc.desc, gotInfo, tc.wantInfo, diff)
@@ -471,6 +479,9 @@ func TestClientEnqueue(t *testing.T) {
 
 		for qname, want := range tc.wantPending {
 			got := h.GetPendingMessages(t, r, qname)
+			for _, msg := range got {
+				msg.CreatedAt = 0
+			}
 			if diff := cmp.Diff(want, got, h.IgnoreIDOpt); diff != "" {
 				t.Errorf("%s;\nmismatch found in %q; (-want,+got)\n%s", tc.desc, base.PendingKey(qname), diff)
 			}
@@ -600,6 +611,7 @@ func TestClientEnqueueWithGroupOption(t *testing.T) {
 			cmpopts.IgnoreFields(TaskInfo{}, "ID"),
 			cmpopts.EquateApproxTime(500 * time.Millisecond),
 		}
+		gotInfo.CreatedAt = time.Time{}
 		if diff := cmp.Diff(tc.wantInfo, gotInfo, cmpOptions...); diff != "" {
 			t.Errorf("%s;\nEnqueue(task) returned %v, want %v; (-want,+got)\n%s",
 				tc.desc, gotInfo, tc.wantInfo, diff)
@@ -607,6 +619,9 @@ func TestClientEnqueueWithGroupOption(t *testing.T) {
 
 		for qname, want := range tc.wantPending {
 			got := h.GetPendingMessages(t, r, qname)
+			for _, msg := range got {
+				msg.CreatedAt = 0
+			}
 			if diff := cmp.Diff(want, got, h.IgnoreIDOpt, cmpopts.EquateEmpty()); diff != "" {
 				t.Errorf("%s;\nmismatch found in %q; (-want,+got)\n%s", tc.desc, base.PendingKey(qname), diff)
 			}
@@ -615,6 +630,9 @@ func TestClientEnqueueWithGroupOption(t *testing.T) {
 		for qname, groups := range tc.wantGroups {
 			for groupKey, want := range groups {
 				got := h.GetGroupEntries(t, r, qname, groupKey)
+				for _, entry := range got {
+					entry.Message.CreatedAt = 0
+				}
 				if diff := cmp.Diff(want, got, h.IgnoreIDOpt, cmpopts.EquateEmpty()); diff != "" {
 					t.Errorf("%s;\nmismatch found in %q; (-want,+got)\n%s", tc.desc, base.GroupKey(qname, groupKey), diff)
 				}
@@ -623,6 +641,9 @@ func TestClientEnqueueWithGroupOption(t *testing.T) {
 
 		for qname, want := range tc.wantScheduled {
 			gotScheduled := h.GetScheduledEntries(t, r, qname)
+			for _, entry := range gotScheduled {
+				entry.Message.CreatedAt = 0
+			}
 			if diff := cmp.Diff(want, gotScheduled, h.IgnoreIDOpt, cmpopts.EquateEmpty()); diff != "" {
 				t.Errorf("%s;\nmismatch found in %q; (-want,+got)\n%s", tc.desc, base.ScheduledKey(qname), diff)
 			}
@@ -693,6 +714,7 @@ func TestClientEnqueueWithTaskIDOption(t *testing.T) {
 		cmpOptions := []cmp.Option{
 			cmpopts.EquateApproxTime(500 * time.Millisecond),
 		}
+		gotInfo.CreatedAt = time.Time{}
 		if diff := cmp.Diff(tc.wantInfo, gotInfo, cmpOptions...); diff != "" {
 			t.Errorf("%s;\nEnqueue(task) returned %v, want %v; (-want,+got)\n%s",
 				tc.desc, gotInfo, tc.wantInfo, diff)
@@ -700,6 +722,9 @@ func TestClientEnqueueWithTaskIDOption(t *testing.T) {
 
 		for qname, want := range tc.wantPending {
 			got := h.GetPendingMessages(t, r, qname)
+			for _, msg := range got {
+				msg.CreatedAt = 0
+			}
 			if diff := cmp.Diff(want, got); diff != "" {
 				t.Errorf("%s;\nmismatch found in %q; (-want,+got)\n%s", tc.desc, base.PendingKey(qname), diff)
 			}
@@ -827,6 +852,7 @@ func TestClientEnqueueWithProcessInOption(t *testing.T) {
 			cmpopts.IgnoreFields(TaskInfo{}, "ID"),
 			cmpopts.EquateApproxTime(500 * time.Millisecond),
 		}
+		gotInfo.CreatedAt = time.Time{}
 		if diff := cmp.Diff(tc.wantInfo, gotInfo, cmpOptions...); diff != "" {
 			t.Errorf("%s;\nEnqueue(task, ProcessIn(%v)) returned %v, want %v; (-want,+got)\n%s",
 				tc.desc, tc.delay, gotInfo, tc.wantInfo, diff)
@@ -834,12 +860,18 @@ func TestClientEnqueueWithProcessInOption(t *testing.T) {
 
 		for qname, want := range tc.wantPending {
 			gotPending := h.GetPendingMessages(t, r, qname)
+			for _, msg := range gotPending {
+				msg.CreatedAt = 0
+			}
 			if diff := cmp.Diff(want, gotPending, h.IgnoreIDOpt, cmpopts.EquateEmpty()); diff != "" {
 				t.Errorf("%s;\nmismatch found in %q; (-want,+got)\n%s", tc.desc, base.PendingKey(qname), diff)
 			}
 		}
 		for qname, want := range tc.wantScheduled {
 			gotScheduled := h.GetScheduledEntries(t, r, qname)
+			for _, entry := range gotScheduled {
+				entry.Message.CreatedAt = 0
+			}
 			if diff := cmp.Diff(want, gotScheduled, h.IgnoreIDOpt, cmpopts.EquateEmpty()); diff != "" {
 				t.Errorf("%s;\nmismatch found in %q; (-want,+got)\n%s", tc.desc, base.ScheduledKey(qname), diff)
 			}
@@ -1024,6 +1056,7 @@ func TestClientWithDefaultOptions(t *testing.T) {
 			cmpopts.IgnoreFields(TaskInfo{}, "ID"),
 			cmpopts.EquateApproxTime(500 * time.Millisecond),
 		}
+		gotInfo.CreatedAt = time.Time{}
 		if diff := cmp.Diff(tc.wantInfo, gotInfo, cmpOptions...); diff != "" {
 			t.Errorf("%s;\nEnqueue(task, opts...) returned %v, want %v; (-want,+got)\n%s",
 				tc.desc, gotInfo, tc.wantInfo, diff)
@@ -1035,6 +1068,7 @@ func TestClientWithDefaultOptions(t *testing.T) {
 			continue
 		}
 		got := pending[0]
+		got.CreatedAt	= 0
 		if diff := cmp.Diff(tc.want, got, h.IgnoreIDOpt); diff != "" {
 			t.Errorf("%s;\nmismatch found in pending task message; (-want,+got)\n%s",
 				tc.desc, diff)

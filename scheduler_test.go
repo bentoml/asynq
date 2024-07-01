@@ -71,6 +71,9 @@ func TestSchedulerRegister(t *testing.T) {
 		scheduler.Shutdown()
 
 		got := testutil.GetPendingMessages(t, r, tc.queue)
+		for _, msg := range got {
+			msg.CreatedAt = 0
+		}
 		if diff := cmp.Diff(tc.want, got, testutil.IgnoreIDOpt); diff != "" {
 			t.Errorf("mismatch found in queue %q: (-want,+got)\n%s", tc.queue, diff)
 		}

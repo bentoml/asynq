@@ -75,6 +75,7 @@ const (
 	Internal
 	AlreadyExists
 	Unknown
+	Full
 	// Note: If you add a new value here, make sure to update String method.
 )
 
@@ -107,6 +108,7 @@ type Op string
 // only the last one is recorded.
 //
 // The types are:
+//
 //	errors.Op
 //		The operation being performed, usually the method
 //		being invoked (Get, Put, etc.).
@@ -173,6 +175,9 @@ var (
 
 	// ErrTaskIdConflict indicates that another task with the same task ID already exist
 	ErrTaskIdConflict = errors.New("task id conflicts with another task")
+
+	// ErrQueueSizeExceeded indicates that the queue size limit has been exceeded.
+	ErrQueueSizeExceeded = errors.New("queue size exceeded")
 )
 
 // TaskNotFoundError indicates that a task with the given ID does not exist

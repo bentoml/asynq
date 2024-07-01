@@ -145,13 +145,13 @@ func (tb *TestBroker) ForwardIfReady(qnames ...string) error {
 	return tb.real.ForwardIfReady(qnames...)
 }
 
-func (tb *TestBroker) DeleteExpiredCompletedTasks(qname string, batchSize int) error {
+func (tb *TestBroker) DeleteExpiredCompletedAndCanceledTasks(qname string, batchSize int, preCleanupFunc func(payload []byte) error) error {
 	tb.mu.Lock()
 	defer tb.mu.Unlock()
 	if tb.sleeping {
 		return errRedisDown
 	}
-	return tb.real.DeleteExpiredCompletedTasks(qname, batchSize)
+	return tb.real.DeleteExpiredCompletedAndCanceledTasks(qname, batchSize, nil)
 }
 
 func (tb *TestBroker) ListLeaseExpired(cutoff time.Time, qnames ...string) ([]*base.TaskMessage, error) {
@@ -215,6 +215,15 @@ func (tb *TestBroker) WriteResult(qname, id string, data []byte) (int, error) {
 		return 0, errRedisDown
 	}
 	return tb.real.WriteResult(qname, id, data)
+}
+
+func (tb *TestBroker) Publish(qname, id string, data []byte) (int, error) {
+	tb.mu.Lock()
+	defer tb.mu.Unlock()
+	if tb.sleeping {
+		return 0, errRedisDown
+	}
+	return tb.real.Publish(qname, id, data)
 }
 
 func (tb *TestBroker) Ping() error {
@@ -296,4 +305,22 @@ func (tb *TestBroker) ReclaimStaleAggregationSets(qname string) error {
 		return errRedisDown
 	}
 	return tb.real.ReclaimStaleAggregationSets(qname)
+}
+
+func (tb *TestBroker) FindAndPendingQueueFullTask(ctx context.Context, queue string) error {
+	tb.mu.Lock()
+	defer tb.mu.Unlock()
+	if tb.sleeping {
+		return errRedisDown
+	}
+	return tb.real.FindAndPendingQueueFullTask(ctx, queue)
+}
+
+func (tb *TestBroker) CancelTask(qname, taskID string) error {
+	tb.mu.Lock()
+	defer tb.mu.Unlock()
+	if tb.sleeping {
+		return errRedisDown
+	}
+	return tb.real.CancelTask(qname, taskID)
 }
