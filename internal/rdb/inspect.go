@@ -1429,17 +1429,13 @@ func (r *RDB) archiveAll(src, dst, qname string) (int64, error) {
 // Numeric code indicating the status:
 // Returns 1 if task is successfully deleted.
 // Returns 0 if task is not found.
-// Returns -1 if task is not in pending or queue_full state.
-// Returns -2 if task is failed to add to canceled set.
+// Returns -1 if task is failed to add to canceled set.
 var cancelTaskCmd = redis.NewScript(`
 if redis.call("EXISTS", KEYS[1]) == 0 then
     return 0
 end
 
 local state = redis.call("HGET", KEYS[1], "state")
-if ARGV[4] ~= "1" and state ~= "pending" and state ~= "queue_full" then
-    return -1
-end
 
 if state == "pending" then
     if redis.call("LREM", KEYS[3], 0, ARGV[1]) == 0 then
@@ -1460,7 +1456,7 @@ elseif state == "scheduled" then
 end
 
 if redis.call("ZADD", KEYS[2], ARGV[2], ARGV[1]) ~= 1 then
-    return -2
+    return -1
 end
 
 redis.call("HSET", KEYS[1], "msg", ARGV[3], "state", "canceled")
@@ -1505,8 +1501,6 @@ func (r *RDB) CancelTask(qname, id string, force bool) error {
 	case 0:
 		return errors.E(op, errors.NotFound, &errors.TaskNotFoundError{Queue: msg.Queue, ID: msg.ID})
 	case -1:
-		return errors.E(op, errors.FailedPrecondition, fmt.Sprintf("can only cancel pending or queue_full task: %s", msg.ID))
-	case -2:
 		return errors.E(op, errors.Internal, fmt.Sprintf("failed to add task to canceled set: %s", msg.ID))
 	default:
 		return errors.E(op, errors.Internal, fmt.Sprintf("unexpected return value from cancelTaskCmd script: %d", n))
