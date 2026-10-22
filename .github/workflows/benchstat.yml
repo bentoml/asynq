@@ -24,7 +24,7 @@ jobs:
       - name: Benchmark
         run: go test -run=^$ -bench=. -count=5 -timeout=60m ./... | tee -a new.txt
       - name: Upload Benchmark
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: bench-incoming
           path: new.txt
@@ -48,7 +48,7 @@ jobs:
       - name: Benchmark
         run: go test -run=^$ -bench=. -count=5 -timeout=60m ./... | tee -a old.txt
       - name: Upload Benchmark
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: bench-current
           path: old.txt
@@ -64,7 +64,7 @@ jobs:
         with:
           go-version: 1.26.10
       - name: Install benchstat
-        run: go get -u golang.org/x/perf/cmd/benchstat
+        run: go install golang.org/x/perf/cmd/benchstat@latest
       - name: Download Incoming
         uses: actions/download-artifact@v4.1.7
         with:
@@ -76,7 +76,7 @@ jobs:
       - name: Benchstat Results
         run: benchstat old.txt new.txt | tee -a benchstat.txt
       - name: Upload benchstat results
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: benchstat
           path: benchstat.txt
